@@ -177,20 +177,9 @@ trait NscSemanticApi extends ReflectToolkit {
     def lookupBothNames(name: String,
                         in: g.Scope,
                         disambiguatingOwner: Option[g.Symbol],
-                        disambiguatingNamespace: String): g.Symbol = {
-      val typeName = g.TypeName(name)
-      val typeNameLookup = in.lookup(typeName)
-      val symbol =
-        if (typeNameLookup.exists) typeNameLookup
-        else {
-          val termName = g.TermName(name)
-          val termNameLookup = in.lookup(termName)
-          if (termNameLookup.exists) termNameLookup
-          else g.NoSymbol
-        }
+                        disambiguatingNamespace: String): List[g.Symbol] = {
 
-      // Disambiguate overloaded symbols caused by name shadowing
-      if (symbol.isOverloaded) {
+      def handleOverloadedSymbol(symbol: g.Symbol) = {
         val alternatives = symbol.alternatives
         disambiguatingOwner
           .flatMap(o => alternatives.find(_.owner == o))
@@ -201,7 +190,26 @@ trait NscSemanticApi extends ReflectToolkit {
             if (substrings.isEmpty) alternatives.head
             else substrings.maxBy(_.fullName.length)
           }
-      } else symbol
+      }
+
+      val typeName = g.TypeName(name)
+      val typeNameLookup = in.lookup(typeName)
+      val typeNameExists = typeNameLookup.exists
+      val termName = g.TermName(name)
+      val termNameLookup = in.lookup(termName)
+      val termNameExists = termNameLookup.exists
+
+      val symbols = List(
+        if (termNameLookup.exists) termNameLookup else g.NoSymbol,
+        if (typeNameLookup.exists) typeNameLookup else g.NoSymbol
+      )
+
+      symbols.map { symbol =>
+        // Disambiguate overloaded symbols caused by name shadowing
+        if (symbol.exists && symbol.isOverloaded)
+          handleOverloadedSymbol(symbol)
+        else symbol
+      }
     }
 
     /** Remove sequential prefixes from a concrete ref. */
@@ -259,16 +267,20 @@ trait NscSemanticApi extends ReflectToolkit {
 
       // Mix local scope with root scope for FQN and non-FQN lookups
       val wholeScope = mixScopes(inScope, realRootScope)
-      val disambiguatingSyntax = ref.syntax
+      val syntax = ref.syntax
       val (_, reversedSymbols) = {
-        names.iterator.foldLeft(wholeScope -> List.empty[g.Symbol]) {
-          case ((scope, symbols), metaName) =>
-            val sym = lookupBothNames(metaName.value,
-                                      scope,
-                                      symbols.headOption,
-                                      disambiguatingSyntax)
-            if (!sym.exists) scope -> symbols
-            else sym.info.members -> (sym :: symbols)
+        val scopes = List(wholeScope, wholeScope)
+        val empty = List.empty[g.Symbol]
+        names.foldLeft(scopes -> symbol -> symbol) {
+          case ((List(termScope, typeScope), symbols), metaName) =>
+            val owner = symbols.headOption
+            val termAndTypeSymbols =
+              lookupBothNames(metaName.value, scope, owner, syntax)
+            if (termSymbol.exists)
+              symbols.reduceLeft { sym =>
+                if (!sym.exists) scope -> symbols
+                else sym.info.members -> (sym :: symbols)
+              }
         }
       }
 
